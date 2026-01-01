@@ -518,12 +518,9 @@ and nothing after that.
     print(raw)
     print("\n--- MODEL RAW END ---\n")
 
-    m = re.search(r"FINAL:\\s*([-+]?\\d+)", raw)
-    if m:
-        ans = int(m.group(1))
-    else:
-        nums = re.findall(r"[-+]?\\d+", raw)
-        ans = int(nums[-1]) if nums else 0
+    # Use the robust extractor defined above
+    ans_opt = extract_answer_int(raw)
+    ans = ans_opt if ans_opt is not None else 0
 
     print(f"[PARSED ANSWER] problem_id={problem_id}, ans={ans}")
     return ans
