@@ -148,11 +148,57 @@ class OpenAICompatEngine(Engine):
         return msg.get("content") or ""
 
 
+class CerebrasSDKEngine(Engine):
+    """
+    Uses the cerebras-cloud-sdk instead of raw HTTP.
+    Only applies when the SDK is installed and a valid API key is provided.
+    """
+
+    def __init__(self, api_key: str, model: str):
+        try:
+            from cerebras.cloud.sdk import Cerebras  # type: ignore
+        except Exception as e:  # pragma: no cover - defensive
+            raise RuntimeError(f"Cerebras SDK not available: {e}")
+        self._client = Cerebras(api_key=api_key)
+        self.model = model
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        seed: int,
+        timeout_s: float,
+    ) -> str:
+        try:
+            completion = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_completion_tokens=max_tokens,
+                temperature=temperature,
+                top_p=1,
+                seed=seed,
+                stream=False,
+                timeout=timeout_s,
+            )
+            # Cerebras SDK returns OpenAI-like structure
+            return completion.choices[0].message.content or ""
+        except Exception as e:
+            return f"FINAL: 0\n\n# CEREBRAS_ERROR: {type(e).__name__}: {e}"
+
+
 def build_engine(cfg: SolverConfig) -> Engine:
     if cfg.engine == "ollama":
         return OllamaEngine(cfg.ollama_base, cfg.ollama_model)
     if cfg.engine == "openai_compat":
         return OpenAICompatEngine(cfg.api_base, cfg.api_key, cfg.api_model)
+    if cfg.engine == "cerebras_sdk":
+        # Use AIMO_API_KEY if set, else fall back to CEREBRAS_API_KEY
+        api_key = cfg.api_key or os.environ.get("CEREBRAS_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("Cerebras SDK engine selected but no API key provided")
+        return CerebrasSDKEngine(api_key, cfg.api_model)
     return DummyEngine()
 
 
