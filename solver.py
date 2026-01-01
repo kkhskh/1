@@ -545,9 +545,3 @@ def _maybe_write_trace(cfg: SolverConfig, problem_id: Optional[str], raw: str, m
             json.dump({"id": pid, "meta": meta, "raw": raw}, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-
-
-# compatibility for scripts that call solve_problem(problem)
-# (legacy signature preserved; ignore cfg)
-def solve_problem(problem_latex: str, problem_id: Optional[str] = None) -> int:
-    return solve(problem_latex, problem_id=problem_id, cfg=None)
