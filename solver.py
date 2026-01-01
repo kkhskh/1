@@ -14,6 +14,7 @@ import urllib.request
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from cerebras.cloud.sdk import Cerebras
 
 
 # ---- Debug hooks (eval_reference.py can read these) ----
@@ -468,69 +469,64 @@ def _attempt(problem: str, engine: Engine, cfg: SolverConfig, seed: int, variant
 
 
 def solve(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional[SolverConfig] = None) -> int:
-    cfg = cfg or SolverConfig()
-    engine = build_engine(cfg)
+    """
+    Simplified solve: bypass old engine/tool loop and call Cerebras SDK directly.
+    Requires env var CEREBRAS_API_KEY. Uses model from AIMO_API_MODEL or defaults to gpt-oss-120b.
+    """
+    api_key = os.environ.get("CEREBRAS_API_KEY")
+    if not api_key:
+        print("[ERROR] CEREBRAS_API_KEY not set; returning 0")
+        return 0
 
-    t0 = time.time()
-    deadline = t0 + cfg.per_problem_time_s
+    model = os.environ.get("AIMO_API_MODEL", "gpt-oss-120b")
 
-    # Even at temp=0, make attempts diverse using prompt variants.
-    variants = ["code_first", "analysis_first", "analysis_first", "code_first"]
+    prompt = f"""
+You are an expert competition mathematician.
+You are solving an olympiad-style math problem given in LaTeX.
 
-    verified_counter: Counter[int] = Counter()
-    all_counter: Counter[int] = Counter()
-    best_raw: str = ""
-    best_meta: Dict[str, Any] = {}
+Follow these rules VERY STRICTLY:
+1) Think step by step.
+2) At the very end, output exactly one line: FINAL: <integer>
+3) Answer must be a single integer (no fractions, no text).
 
-    for i in range(cfg.num_attempts):
-        if time.time() > deadline:
-            break
+Problem (LaTeX):
+{problem_latex}
 
-        variant = variants[i % len(variants)]
-        seed_i = cfg.seed + 101 * i
+Now solve it. End with a single line like:
+FINAL: 336
+and nothing after that.
+""".strip()
 
-        cand = _attempt(problem_latex, engine, cfg, seed=seed_i, variant=variant)
-        all_counter[cand.answer] += 1
-        if cand.verified:
-            verified_counter[cand.answer] += 1
+    try:
+        client = getattr(solve, "_cb_client", None)
+        if client is None:
+            client = Cerebras(api_key=api_key)
+            solve._cb_client = client  # type: ignore[attr-defined]
 
-        # keep last raw for logging
-        best_raw = cand.raw
-        best_meta = {
-            "engine": cfg.engine,
-            "model": cfg.ollama_model if cfg.engine == "ollama" else cfg.api_model,
-            "variant": variant,
-            "attempt_index": i,
-            "verified": cand.verified,
-            "answer": cand.answer,
-            "counts_verified": dict(verified_counter),
-            "counts_all": dict(all_counter),
-        }
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=1024,
+            temperature=0.2,
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception as e:
+        print(f"[ERROR] Cerebras call failed for {problem_id}: {e}")
+        return 0
 
-        # early stop: two verified matches
-        if verified_counter[cand.answer] >= 2:
-            _set_last_raw(best_raw, best_meta)
-            _maybe_write_trace(cfg, problem_id, best_raw, best_meta)
-            return cand.answer
+    print("\n--- MODEL RAW START ---\n")
+    print(raw)
+    print("\n--- MODEL RAW END ---\n")
 
-    # choose
-    if verified_counter:
-        best_freq = max(verified_counter.values())
-        best = sorted([a for a, c in verified_counter.items() if c == best_freq])[0]
-        _set_last_raw(best_raw, best_meta)
-        _maybe_write_trace(cfg, problem_id, best_raw, best_meta)
-        return best
+    m = re.search(r"FINAL:\\s*([-+]?\\d+)", raw)
+    if m:
+        ans = int(m.group(1))
+    else:
+        nums = re.findall(r"[-+]?\\d+", raw)
+        ans = int(nums[-1]) if nums else 0
 
-    if all_counter:
-        best_freq = max(all_counter.values())
-        best = sorted([a for a, c in all_counter.items() if c == best_freq])[0]
-        _set_last_raw(best_raw, best_meta)
-        _maybe_write_trace(cfg, problem_id, best_raw, best_meta)
-        return best
-
-    _set_last_raw(best_raw, best_meta)
-    _maybe_write_trace(cfg, problem_id, best_raw, best_meta)
-    return 0
+    print(f"[PARSED ANSWER] problem_id={problem_id}, ans={ans}")
+    return ans
 
 
 def _maybe_write_trace(cfg: SolverConfig, problem_id: Optional[str], raw: str, meta: Dict[str, Any]) -> None:
