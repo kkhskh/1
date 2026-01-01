@@ -52,7 +52,7 @@ def predict(*args: Any, **kwargs: Any) -> Dict[str, int]:
     """
     try:
         pid, prob = _coerce_inputs(*args, **kwargs)
-        ans, _raw = solve_problem(prob, problem_id=pid, cfg=_CFG)
+        ans = solve_problem(prob, problem_id=pid, cfg=_CFG)
         return {"answer": ans}
     except Exception:
         # Never crash the evaluation server
