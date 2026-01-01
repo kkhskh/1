@@ -470,8 +470,8 @@ def _attempt(problem: str, engine: Engine, cfg: SolverConfig, seed: int, variant
 
 def solve(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional[SolverConfig] = None) -> int:
     """
-    Simplified solve: bypass old engine/tool loop and call Cerebras SDK directly.
-    Requires env var CEREBRAS_API_KEY. Uses model from AIMO_API_MODEL or defaults to gpt-oss-120b.
+    Simple solve that *only* calls Cerebras gpt-oss-120b and extracts one integer.
+    Ignores AIMO_ENGINE etc.
     """
     api_key = os.environ.get("CEREBRAS_API_KEY")
     if not api_key:
@@ -498,6 +498,7 @@ and nothing after that.
 """.strip()
 
     try:
+        # Reuse client between calls
         client = getattr(solve, "_cb_client", None)
         if client is None:
             client = Cerebras(api_key=api_key)
@@ -518,12 +519,19 @@ and nothing after that.
     print(raw)
     print("\n--- MODEL RAW END ---\n")
 
-    # Use the robust extractor defined above
+    # Robust extraction: FINAL: <int>, or \boxed{}, or last integer
     ans_opt = extract_answer_int(raw)
     ans = ans_opt if ans_opt is not None else 0
 
     print(f"[PARSED ANSWER] problem_id={problem_id}, ans={ans}")
     return ans
+
+
+def solve_problem(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional[SolverConfig] = None) -> int:
+    """
+    Compatibility wrapper used by eval_reference.py and submission_entry.py.
+    """
+    return solve(problem_latex, problem_id=problem_id, cfg=cfg)
 
 
 def _maybe_write_trace(cfg: SolverConfig, problem_id: Optional[str], raw: str, meta: Dict[str, Any]) -> None:
@@ -540,5 +548,6 @@ def _maybe_write_trace(cfg: SolverConfig, problem_id: Optional[str], raw: str, m
 
 
 # compatibility for scripts that call solve_problem(problem)
+# (legacy signature preserved; ignore cfg)
 def solve_problem(problem_latex: str, problem_id: Optional[str] = None) -> int:
-    return solve(problem_latex, problem_id=problem_id)
+    return solve(problem_latex, problem_id=problem_id, cfg=None)
