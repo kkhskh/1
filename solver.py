@@ -468,10 +468,16 @@ def _attempt(problem: str, engine: Engine, cfg: SolverConfig, seed: int, variant
     return Candidate(answer=0, verified=False, raw="\n\n".join(raw_parts))
 
 
-def solve(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional[SolverConfig] = None) -> int:
+
+def solve(
+    problem_latex: str,
+    problem_id: Optional[str] = None,
+    *,
+    cfg: Optional[SolverConfig] = None,
+) -> int:
     """
-    Simple solve that *only* calls Cerebras gpt-oss-120b and extracts one integer.
-    Ignores AIMO_ENGINE etc.
+    Simple solve that calls Cerebras gpt-oss-120b a few times
+    and majority-votes the integer answer.
     """
     api_key = os.environ.get("CEREBRAS_API_KEY")
     if not api_key:
@@ -479,6 +485,15 @@ def solve(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional
         return 0
 
     model = os.environ.get("AIMO_API_MODEL", "gpt-oss-120b")
+
+    # How many samples to take (default 3)
+    num_samples = int(os.getenv("AIMO_NUM_ATTEMPTS", "3"))
+
+    from cerebras.cloud.sdk import Cerebras  # local import to avoid issues
+    client = getattr(solve, "_cb_client", None)
+    if client is None:
+        client = Cerebras(api_key=api_key)
+        solve._cb_client = client  # type: ignore[attr-defined]
 
     prompt = f"""
 You are an expert competition mathematician.
@@ -497,34 +512,39 @@ FINAL: 336
 and nothing after that.
 """.strip()
 
-    try:
-        # Reuse client between calls
-        client = getattr(solve, "_cb_client", None)
-        if client is None:
-            client = Cerebras(api_key=api_key)
-            solve._cb_client = client  # type: ignore[attr-defined]
+    from collections import Counter
+    answers = Counter()
+    last_raw = ""
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=1024,
-            temperature=0.2,
-        )
-        raw = resp.choices[0].message.content or ""
-    except Exception as e:
-        print(f"[ERROR] Cerebras call failed for {problem_id}: {e}")
+    for k in range(num_samples):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=int(os.getenv("AIMO_MAX_TOKENS", "1024")),
+                temperature=float(os.getenv("AIMO_TEMPERATURE", "0.2")),
+                seed=k,
+            )
+            raw = resp.choices[0].message.content or ""
+        except Exception as e:
+            print(f"[ERROR] Cerebras call failed for {problem_id} (sample {k}): {e}")
+            continue
+
+        last_raw = raw
+        ans_opt = extract_answer_int(raw)
+        if ans_opt is not None:
+            answers[_normalize_answer(ans_opt)] += 1
+
+    # record debug tail for eval_reference.py
+    _set_last_raw(last_raw, {"answers": dict(answers)})
+
+    if not answers:
         return 0
 
-    print("\n--- MODEL RAW START ---\n")
-    print(raw)
-    print("\n--- MODEL RAW END ---\n")
-
-    # Robust extraction: FINAL: <int>, or \boxed{}, or last integer
-    ans_opt = extract_answer_int(raw)
-    ans = ans_opt if ans_opt is not None else 0
-
-    print(f"[PARSED ANSWER] problem_id={problem_id}, ans={ans}")
-    return ans
+    # majority vote (smallest on ties)
+    best_count = max(answers.values())
+    best = min(a for a, c in answers.items() if c == best_count)
+    return best
 
 
 def solve_problem(problem_latex: str, problem_id: Optional[str] = None, *, cfg: Optional[SolverConfig] = None) -> int:
