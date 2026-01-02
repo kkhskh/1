@@ -531,19 +531,28 @@ and nothing after that.
             continue
 
         last_raw = raw
+        
+        # Print raw output for debugging
+        print("\n--- MODEL RAW START ---")
+        print(raw)
+        print("--- MODEL RAW END ---\n")
+        
         ans_opt = extract_answer_int(raw)
         if ans_opt is not None:
             answers[_normalize_answer(ans_opt)] += 1
+            print(f"[EXTRACTED] sample {k}: {ans_opt}")
 
     # record debug tail for eval_reference.py
     _set_last_raw(last_raw, {"answers": dict(answers)})
 
     if not answers:
+        print(f"[PARSED ANSWER] problem_id={problem_id}, ans=0 (no valid answers extracted)")
         return 0
 
     # majority vote (smallest on ties)
     best_count = max(answers.values())
     best = min(a for a, c in answers.items() if c == best_count)
+    print(f"[PARSED ANSWER] problem_id={problem_id}, ans={best}, votes={dict(answers)}")
     return best
 
 
