@@ -76,11 +76,13 @@ def prepare_training_data(dataset):
 
         return {"text": text}
 
-    # Process dataset - limit to reasonable size for training
-    max_samples = int(os.getenv('MAX_SAMPLES', '10000'))  # Configurable via env var
-    if len(dataset) > max_samples:
+    # Process dataset - use full dataset by default (Colab Pro can handle it)
+    max_samples = int(os.getenv('MAX_SAMPLES', '0'))  # 0 = use full dataset
+    if max_samples > 0 and len(dataset) > max_samples:
         print(f"Limiting to {max_samples} samples for training speed")
         dataset = dataset.select(range(max_samples))
+    else:
+        print(f"Using full dataset: {len(dataset)} samples")
 
     train_data = dataset.map(format_example)
 
