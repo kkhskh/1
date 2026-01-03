@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""
+Train on OpenMathReasoning dataset from NVIDIA
+This was used to win AIMO-2 Kaggle competition
+
+Based on: https://huggingface.co/datasets/nvidia/OpenMathReasoning
+"""
+
+import os
+from datasets import load_dataset, Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling,
+    default_data_collator
+)
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+import torch
+
+def create_sample_dataset():
+    """Create a small sample dataset to demonstrate the training approach"""
+    # Based on OpenMathReasoning structure from the paper
+    sample_problems = [
+        {
+            "problem": "Solve for x: 2x + 3 = 7",
+            "generated_solution": "Subtract 3 from both sides: 2x = 4\nDivide by 2: x = 2\n\nFINAL: 2",
+            "expected_answer": "2"
+        },
+        {
+            "problem": "What is 1-1?",
+            "generated_solution": "Subtracting 1 from 1 gives 0.\n\nFINAL: 0",
+            "expected_answer": "0"
+        },
+        {
+            "problem": "Solve ∫(x²+3x+1)dx",
+            "generated_solution": "The integral of x²+3x+1 is (1/3)x³ + (3/2)x² + x + C\n\nFINAL: \\frac{1}{3}x^{3} + \\frac{3}{2}x^{2} + x + C",
+            "expected_answer": "\\frac{1}{3}x^{3} + \\frac{3}{2}x^{2} + x + C"
+        }
+    ]
+
+    print("Using sample dataset (replace with actual OpenMathReasoning when available)")
+    return Dataset.from_list(sample_problems)
+
+def load_math_dataset():
+    """Load the OpenMathReasoning dataset"""
+    try:
+        print("Loading OpenMathReasoning dataset...")
+        dataset = load_dataset("nvidia/OpenMathReasoning")
+
+        # Use the CoT (Chain-of-Thought) split which has solutions
+        cot_data = dataset['cot']
+        print(f"✅ Loaded CoT dataset: {len(cot_data)} samples")
+
+        # Filter for problems with extracted answers (higher quality)
+        filtered_data = cot_data.filter(lambda x: x['problem_type'] == 'has_answer_extracted')
+        print(f"✅ Filtered to {len(filtered_data)} problems with extracted answers")
+
+        return filtered_data
+
+    except Exception as e:
+        print(f"❌ Could not load dataset: {e}")
+        print("Using sample dataset instead...")
+        return create_sample_dataset()
+
+def prepare_training_data(dataset):
+    """Prepare dataset for training"""
+    def format_example(example):
+        """Format problem + solution as training text"""
+        problem = example['problem']
+        solution = example['generated_solution']
+
+        # Format as instruction-response (following OpenMathReasoning style)
+        text = f"Problem: {problem}\n\n{solution}"
+
+        return {"text": text}
+
+    # Process dataset - limit to reasonable size for training
+    max_samples = 10000  # Start small for testing
+    if len(dataset) > max_samples:
+        print(f"Limiting to {max_samples} samples for training speed")
+        dataset = dataset.select(range(max_samples))
+
+    train_data = dataset.map(format_example)
+
+    print(f"Training samples: {len(train_data)}")
+    print(f"Sample formatted text: {train_data[0]['text'][:500]}...")
+
+    return train_data
+
+def setup_model_and_tokenizer():
+    """Setup model and tokenizer for training with LoRA"""
+    # Use a small but capable math model
+    # For production, use larger models like Qwen2.5-Math-7B, but this works for testing
+    model_name = "Qwen/Qwen2.5-0.5B-Instruct"  # Small Qwen model for math tasks
+
+    print(f"Loading model: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Add padding token if needed
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+    # Enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
+    model = prepare_model_for_kbit_training(model)
+
+    # LoRA configuration for Qwen models
+    lora_config = LoraConfig(
+        r=16,  # Rank
+        lora_alpha=32,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+
+    # Apply LoRA
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
+    return model, tokenizer
+
+def tokenize_function(examples, tokenizer):
+    """Tokenize the text for instruction tuning"""
+    return tokenizer(
+        examples["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=1024,
+        return_tensors="pt"
+    )
+
+def main():
+    """Main training function"""
+    # Load data
+    dataset = load_math_dataset()
+
+    # Prepare training data
+    train_data = prepare_training_data(dataset)
+
+    # Setup model
+    model, tokenizer = setup_model_and_tokenizer()
+
+    # Tokenize dataset
+    print("Tokenizing dataset...")
+    tokenized_dataset = train_data.map(
+        lambda x: tokenize_function(x, tokenizer),
+        batched=True,
+        remove_columns=["text"]
+    )
+
+    # Training arguments for LoRA fine-tuning
+    training_args = TrainingArguments(
+        output_dir="./models/openmath-finetuned",
+        per_device_train_batch_size=1,  # Very small batch for small model
+        gradient_accumulation_steps=4,
+        num_train_epochs=1,  # Start with 1 epoch for testing
+        learning_rate=2e-4,  # Higher learning rate for LoRA
+        # fp16=True,  # Disabled for MPS/CPU
+        save_steps=100,
+        logging_steps=10,
+        save_total_limit=2,
+        eval_strategy="no",
+        report_to="none",
+        warmup_steps=10,
+    )
+
+    # Data collator
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+    )
+
+    # Trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_dataset,
+        data_collator=data_collator,
+    )
+
+    # Train
+    print("Starting training...")
+    trainer.train()
+
+    # Save model
+    trainer.save_model("./models/openmath-finetuned")
+    tokenizer.save_pretrained("./models/openmath-finetuned")
+
+    print("Training complete! Model saved to ./models/openmath-finetuned")
+
+if __name__ == "__main__":
+    main()

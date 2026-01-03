@@ -2,12 +2,12 @@
 import os
 
 # Model configuration
-MODEL_NAME = os.getenv("AIMO_MODEL_NAME", "gpt-oss-120b")
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+MODEL_NAME = os.getenv("AIMO_MODEL_NAME", "mightykatun/qwen2.5-math:7b")  # Math model from Ollama  # Back to working model
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 
 # Inference configuration
-NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "3"))
-MAX_TOKENS = int(os.getenv("AIMO_MAX_TOKENS", "1024"))
+NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "1"))  # 1 attempt per problem for speed
+MAX_TOKENS = int(os.getenv("AIMO_MAX_TOKENS", "512"))  # Reduced from 1024
 TEMPERATURE = float(os.getenv("AIMO_TEMPERATURE", "0.2"))
 
 # Paths - adjust based on environment

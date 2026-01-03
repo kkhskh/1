@@ -1,11 +1,33 @@
 # selector.py
+import re
 from typing import List
 from collections import Counter
 from tools import SolutionCandidate
 
 def normalize_answer(ans: str) -> str:
-    # later you can add simplification, fraction normalization etc.
-    return ans.strip()
+    """Normalize answer for proper voting comparison"""
+    s = ans.strip()
+    s = re.sub(r"\\(,|!|\s)+", "", s)  # Remove LaTeX spacing
+    s = s.replace("−", "-")  # Unicode minus to ASCII
+    s = s.strip(" .;")  # Remove trailing punctuation
+
+    # Try sympy simplification if available
+    try:
+        import sympy as sp
+        expr = sp.sympify(s, evaluate=True)
+        expr = sp.simplify(expr)
+
+        # If it's rational/integer, canonicalize
+        if expr.is_Rational:
+            return str(sp.nsimplify(expr))
+        # If numeric, try to convert to rational
+        if expr.is_number:
+            rat = sp.nsimplify(expr, rational=True)
+            return str(rat)
+    except Exception:
+        pass
+
+    return s
 
 def select_best(candidates: List[SolutionCandidate], problem_text: str) -> SolutionCandidate:
     # filter out those with no parseable answer

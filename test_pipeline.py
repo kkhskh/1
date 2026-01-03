@@ -7,25 +7,10 @@ from config import PROBLEMS_FILE
 
 def test_single_problem():
     # Check if API key is set
-    if not os.getenv("CEREBRAS_API_KEY"):
-        print("ERROR: CEREBRAS_API_KEY environment variable not set!")
-        print("Please set it with: export CEREBRAS_API_KEY='your-key-here'")
-        print("\nRunning dry-run mode (no API calls)...")
-
-        # Dry run - just test data loading and parsing
-        df = pd.read_csv(PROBLEMS_FILE)
-        row = df.iloc[0]
-        problem_id = row["id"]
-        problem_text = row["problem"]
-        print(f"Loaded problem {problem_id}: {problem_text}")
-
-        # Test answer extraction
-        from tools import extract_final_answer
-        test_text = "Let me solve this step by step.\nFINAL: 42"
-        extracted = extract_final_answer(test_text)
-        print(f"Test extraction: '{test_text}' -> '{extracted}'")
-
-        return
+    if not os.getenv("OPENROUTER_API_KEY"):
+        print("ERROR: OPENROUTER_API_KEY environment variable not set!")
+        print("Using default key from config.py...")
+        # The key is already set in config.py, so continue with API calls
     # Load test data
     df = pd.read_csv(PROBLEMS_FILE)
     row = df.iloc[0]  # Test first problem
