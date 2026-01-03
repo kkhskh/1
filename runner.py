@@ -19,18 +19,20 @@ def main():
         # core: generate candidates with one chosen model
         candidates = generate_solutions(problem_text, k=NUM_ATTEMPTS)
 
-        # pick one final answer
+        # pick one final answer using competition-grade selection
         best = select_best(candidates, problem_text)
 
         # Convert answer to int if possible, else 0
         try:
             final_answer = int(best.final_answer) if best.final_answer else 0
-        except ValueError:
+        except (ValueError, TypeError):
             final_answer = 0
 
         outputs.append({"problem_id": problem_id, "answer": final_answer})
 
-        print(f"  -> Answer: {final_answer}")
+        # Show selection details
+        valid_count = sum(1 for c in candidates if c.final_answer is not None)
+        print(f"  -> Answer: {final_answer} (from {valid_count}/{len(candidates)} valid, score: {best.score:.2f})")
 
     save_submission(outputs, SUBMISSION_FILE)
     print(f"Saved submission to {SUBMISSION_FILE}")

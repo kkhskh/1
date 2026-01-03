@@ -6,9 +6,9 @@ MODEL_NAME = os.getenv("AIMO_MODEL_NAME", "mightykatun/qwen2.5-math:7b")  # Math
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")  # Set via environment variable only
 
 # Inference configuration
-NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "1"))  # 1 attempt per problem for speed
-MAX_TOKENS = int(os.getenv("AIMO_MAX_TOKENS", "512"))  # Reduced from 1024
-TEMPERATURE = float(os.getenv("AIMO_TEMPERATURE", "0.2"))
+NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "8"))  # Increased for diversity (was 1)
+MAX_TOKENS = int(os.getenv("AIMO_MAX_TOKENS", "1024"))  # Restored for tool use
+TEMPERATURE = float(os.getenv("AIMO_TEMPERATURE", "0.3"))  # Moderate for diversity
 
 # Paths - adjust based on environment
 if os.path.exists("/kaggle/input/ai-mathematical-olympiad-progress-prize-3"):

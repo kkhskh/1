@@ -1,15 +1,20 @@
-# selector.py
+# selector.py - Competition-grade selection with verification
 import re
 from typing import List
 from collections import Counter
-from tools import SolutionCandidate
+from tools import SolutionCandidate, arith_sanity_check, extract_code_blocks, safe_exec_python
 
 def normalize_answer(ans: str) -> str:
-    """Normalize answer for proper voting comparison"""
+    """Advanced answer normalization for math competitions"""
+    if not ans:
+        return ""
+
     s = ans.strip()
     s = re.sub(r"\\(,|!|\s)+", "", s)  # Remove LaTeX spacing
     s = s.replace("−", "-")  # Unicode minus to ASCII
-    s = s.strip(" .;")  # Remove trailing punctuation
+    s = s.replace("\\frac", "")  # Remove fraction commands
+    s = re.sub(r"\\boxed\{([^}]+)\}", r"\1", s)  # Extract boxed content
+    s = s.strip(" .;{}")  # Remove trailing punctuation
 
     # Try sympy simplification if available
     try:
@@ -29,26 +34,100 @@ def normalize_answer(ans: str) -> str:
 
     return s
 
+def score_candidate(candidate: SolutionCandidate, problem_text: str) -> float:
+    """Score a candidate solution using deterministic checks"""
+    score = 0.0
+
+    # Base score for having an answer
+    if candidate.final_answer:
+        score += 1.0
+
+    # Arithmetic sanity check
+    arith_score = arith_sanity_check(candidate.raw_text)
+    score += arith_score * 2.0  # Weight arithmetic consistency heavily
+
+    # Code execution verification
+    code_blocks = extract_code_blocks(candidate.raw_text)
+    if code_blocks:
+        code_score = 0.0
+        for code in code_blocks:
+            try:
+                result = safe_exec_python(code)
+                if "EXECUTION_ERROR" not in result:
+                    code_score += 1.0
+            except:
+                pass
+        score += (code_score / len(code_blocks)) * 1.5  # Bonus for working code
+
+    # Length bonus (reasonable solutions aren't too short/long)
+    text_len = len(candidate.raw_text)
+    if 100 < text_len < 2000:  # Reasonable length
+        score += 0.5
+
+    # Penalty for obvious errors
+    if "I don't know" in candidate.raw_text or "cannot solve" in candidate.raw_text:
+        score -= 2.0
+
+    return score
+
+def run_verifier(candidate: SolutionCandidate, problem_text: str) -> float:
+    """Run LLM verifier on shortlisted candidates only"""
+    # For now, return score based on deterministic checks
+    # In production, this would call a separate verifier model
+    # But we implement the pipeline structure
+
+    verifier_score = score_candidate(candidate, problem_text)
+
+    # Additional verifier logic would go here
+    # Check for logical consistency, mathematical validity, etc.
+
+    return min(verifier_score, 5.0)  # Cap at reasonable max
+
 def select_best(candidates: List[SolutionCandidate], problem_text: str) -> SolutionCandidate:
-    # filter out those with no parseable answer
+    """
+    Competition-grade selection: vote → shortlist → verify → choose
+    Based on AIMO-2 winning approach and LLM math reasoning papers
+    """
+    # Step 1: Filter valid candidates
     valid = [c for c in candidates if c.final_answer is not None]
     if not valid:
-        # if everything failed, just fall back to the first raw candidate
-        # with a dummy answer (or None); Kaggle will mark it wrong but it won't crash
-        return candidates[0]
+        return candidates[0] if candidates else SolutionCandidate("", None)
 
-    # normalize answers
-    normalized = [normalize_answer(c.final_answer) for c in valid]
-    counter = Counter(normalized)
+    # Step 2: Bucket by normalized answer (vote phase)
+    normalized_answers = []
+    for c in valid:
+        norm_ans = normalize_answer(c.final_answer)
+        normalized_answers.append(norm_ans)
+        c.final_answer = norm_ans  # Update with normalized version
 
-    # pick the answer string with max frequency
-    best_ans, _ = counter.most_common(1)[0]
+    counter = Counter(normalized_answers)
 
-    # among candidates with that answer, you can pick the longest reasoning, etc.
-    same_bucket = [c for c in valid if normalize_answer(c.final_answer) == best_ans]
-    same_bucket.sort(key=lambda c: len(c.raw_text), reverse=True)
+    # Step 3: Shortlist top 2-3 answer buckets (avoid verifier gaming)
+    top_answers = counter.most_common(3)  # Keep top 3 buckets
 
-    # for now, just take the first one
-    chosen = same_bucket[0]
-    chosen.final_answer = best_ans
-    return chosen
+    # Step 4: Score candidates within shortlisted buckets
+    scored_candidates = []
+    for ans, count in top_answers:
+        bucket_candidates = [c for c in valid if normalize_answer(c.final_answer) == ans]
+
+        for candidate in bucket_candidates:
+            # Deterministic scoring first
+            det_score = score_candidate(candidate, problem_text)
+            candidate.score = det_score + count  # Combine bucket frequency + quality
+
+            scored_candidates.append(candidate)
+
+    # Step 5: Run verifier on top candidates only (avoid scaling flaws)
+    top_candidates = sorted(scored_candidates, key=lambda c: c.score, reverse=True)[:4]
+
+    for candidate in top_candidates:
+        verifier_score = run_verifier(candidate, problem_text)
+        candidate.score += verifier_score
+
+    # Step 6: Choose winner by combined score
+    winner = max(top_candidates, key=lambda c: c.score)
+
+    # Final normalization
+    winner.final_answer = normalize_answer(winner.final_answer)
+
+    return winner
