@@ -17,6 +17,7 @@ from transformers import (
     default_data_collator
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from transformers import BitsAndBytesConfig
 import torch
 
 def create_sample_dataset():
@@ -47,7 +48,19 @@ def load_math_dataset():
     """Load the OpenMathReasoning dataset"""
     try:
         print("Loading OpenMathReasoning dataset...")
-        dataset = load_dataset("nvidia/OpenMathReasoning")
+        # Add retry logic for HuggingFace API issues
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                dataset = load_dataset("nvidia/OpenMathReasoning", trust_remote_code=True)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Attempt {attempt + 1} failed: {e}. Retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    raise e
 
         # Use the CoT (Chain-of-Thought) split which has solutions
         cot_data = dataset['cot']
@@ -60,7 +73,7 @@ def load_math_dataset():
         return filtered_data
 
     except Exception as e:
-        print(f"❌ Could not load dataset: {e}")
+        print(f"❌ Could not load dataset after retries: {e}")
         print("Using sample dataset instead...")
         return create_sample_dataset()
 
@@ -103,10 +116,19 @@ def setup_model_and_tokenizer():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # 4-bit quantization for memory efficiency
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4"
+    )
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
-        device_map="auto"
+        quantization_config=bnb_config,
+        device_map="auto",
+        trust_remote_code=True
     )
 
     # Enable gradient checkpointing for memory efficiency
@@ -158,20 +180,21 @@ def main():
         remove_columns=["text"]
     )
 
-    # Training arguments for LoRA fine-tuning
+    # Training arguments for LoRA fine-tuning with quantization
     training_args = TrainingArguments(
         output_dir="./models/openmath-finetuned",
-        per_device_train_batch_size=int(os.getenv('BATCH_SIZE', '1')),
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=int(os.getenv('BATCH_SIZE', '1')),  # Keep small for quantized model
+        gradient_accumulation_steps=8,  # Increased for effective batch size
         num_train_epochs=int(os.getenv('NUM_EPOCHS', '1')),
-        learning_rate=float(os.getenv('LEARNING_RATE', '2e-4')),
-        fp16=True,  # Enable for GPU
-        save_steps=100,
-        logging_steps=10,
+        learning_rate=float(os.getenv('LEARNING_RATE', '1e-4')),  # Slightly lower for quantized
+        # fp16=False when using quantization (bnb handles it)
+        save_steps=50,  # Save more frequently
+        logging_steps=5,  # Log more frequently
         save_total_limit=2,
         eval_strategy="no",
         report_to="none",
         warmup_steps=10,
+        optim="paged_adamw_8bit",  # Better optimizer for quantized models
     )
 
     # Data collator
