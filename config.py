@@ -3,7 +3,7 @@ import os
 
 # Model configuration
 MODEL_NAME = os.getenv("AIMO_MODEL_NAME", "mightykatun/qwen2.5-math:7b")  # Math model from Ollama  # Back to working model
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")  # Set via environment variable only
 
 # Inference configuration
 NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "1"))  # 1 attempt per problem for speed
