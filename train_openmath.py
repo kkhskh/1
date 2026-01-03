@@ -53,7 +53,7 @@ def load_math_dataset():
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                dataset = load_dataset("nvidia/OpenMathReasoning", trust_remote_code=True)
+                dataset = load_dataset("nvidia/OpenMathReasoning")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
