@@ -77,7 +77,7 @@ def prepare_training_data(dataset):
         return {"text": text}
 
     # Process dataset - limit to reasonable size for training
-    max_samples = 10000  # Start small for testing
+    max_samples = int(os.getenv('MAX_SAMPLES', '10000'))  # Configurable via env var
     if len(dataset) > max_samples:
         print(f"Limiting to {max_samples} samples for training speed")
         dataset = dataset.select(range(max_samples))
@@ -91,9 +91,8 @@ def prepare_training_data(dataset):
 
 def setup_model_and_tokenizer():
     """Setup model and tokenizer for training with LoRA"""
-    # Use a small but capable math model
-    # For production, use larger models like Qwen2.5-Math-7B, but this works for testing
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"  # Small Qwen model for math tasks
+    # Use environment variable or default model
+    model_name = os.getenv('MODEL_NAME', "Qwen/Qwen2.5-0.5B-Instruct")
 
     print(f"Loading model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -160,11 +159,11 @@ def main():
     # Training arguments for LoRA fine-tuning
     training_args = TrainingArguments(
         output_dir="./models/openmath-finetuned",
-        per_device_train_batch_size=1,  # Very small batch for small model
+        per_device_train_batch_size=int(os.getenv('BATCH_SIZE', '1')),
         gradient_accumulation_steps=4,
-        num_train_epochs=1,  # Start with 1 epoch for testing
-        learning_rate=2e-4,  # Higher learning rate for LoRA
-        # fp16=True,  # Disabled for MPS/CPU
+        num_train_epochs=int(os.getenv('NUM_EPOCHS', '1')),
+        learning_rate=float(os.getenv('LEARNING_RATE', '2e-4')),
+        fp16=True,  # Enable for GPU
         save_steps=100,
         logging_steps=10,
         save_total_limit=2,
