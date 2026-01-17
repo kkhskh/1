@@ -231,15 +231,6 @@ def setup_model_and_tokenizer():
 
     return model, tokenizer
 
-def tokenize_function(examples):
-    """Tokenize the text for instruction tuning"""
-    return tokenizer(
-        examples["text"],
-        truncation=True,
-        max_length=MAX_LENGTH,
-        padding=False,          # dynamic padding via collator
-    )
-
 def main():
     """Main training function"""
     # Load data with efficient TIR oversampling
@@ -250,6 +241,15 @@ def main():
 
     # Setup model
     model, tokenizer = setup_model_and_tokenizer()
+
+    def tokenize_function(examples):
+        """Tokenize the text for instruction tuning"""
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=MAX_LENGTH,
+            padding=False,          # dynamic padding via collator
+        )
 
     # Tokenize dataset
     print("Tokenizing dataset...")
