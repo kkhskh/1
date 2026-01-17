@@ -276,7 +276,6 @@ def main():
         logging_steps=10,
         save_steps=200,
         save_total_limit=2,
-        evaluation_strategy="no",
     )
 
     # Data collator
