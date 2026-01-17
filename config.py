@@ -6,7 +6,7 @@ MODEL_NAME = os.getenv("AIMO_MODEL_NAME", "mightykatun/qwen2.5-math:7b")  # Math
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")  # Set via environment variable only
 
 # Inference configuration
-NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "8"))  # Increased for diversity (was 1)
+NUM_ATTEMPTS = int(os.getenv("AIMO_NUM_ATTEMPTS", "16"))  # Full diversity: 4 templates × 4 temps = 16 combos
 MAX_TOKENS = int(os.getenv("AIMO_MAX_TOKENS", "1024"))  # Restored for tool use
 TEMPERATURE = float(os.getenv("AIMO_TEMPERATURE", "0.3"))  # Moderate for diversity
 

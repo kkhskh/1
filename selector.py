@@ -2,37 +2,45 @@
 import re
 from typing import List
 from collections import Counter
-from tools import SolutionCandidate, arith_sanity_check, extract_code_blocks, safe_exec_python
+from tools import SolutionCandidate, arith_sanity_check
 
 def normalize_answer(ans: str) -> str:
-    """Advanced answer normalization for math competitions"""
+    """Clean integer extraction for math competitions"""
     if not ans:
         return ""
 
     s = ans.strip()
-    s = re.sub(r"\\(,|!|\s)+", "", s)  # Remove LaTeX spacing
-    s = s.replace("−", "-")  # Unicode minus to ASCII
-    s = s.replace("\\frac", "")  # Remove fraction commands
-    s = re.sub(r"\\boxed\{([^}]+)\}", r"\1", s)  # Extract boxed content
-    s = s.strip(" .;{}")  # Remove trailing punctuation
 
-    # Try sympy simplification if available
-    try:
-        import sympy as sp
-        expr = sp.sympify(s, evaluate=True)
-        expr = sp.simplify(expr)
+    # Extract boxed content first (most common format)
+    boxed_match = re.search(r"\\boxed\{([^}]+)\}", s)
+    if boxed_match:
+        s = boxed_match.group(1).strip()
 
-        # If it's rational/integer, canonicalize
-        if expr.is_Rational:
-            return str(sp.nsimplify(expr))
-        # If numeric, try to convert to rational
-        if expr.is_number:
-            rat = sp.nsimplify(expr, rational=True)
-            return str(rat)
-    except Exception:
-        pass
+    # Look for clean integer patterns in order of preference
+    patterns = [
+        r"^(-?\d+)$",                    # Just a number: "42"
+        r"answer\s+is\s+(-?\d+)",        # "answer is 42"
+        r"final\s+answer\s+is\s+(-?\d+)", # "final answer is 42"
+        r"result\s+is\s+(-?\d+)",        # "result is 42"
+        r"(-?\d+)",                     # Any number in the text
+    ]
 
-    return s
+    for pattern in patterns:
+        match = re.search(pattern, s, re.IGNORECASE)
+        if match:
+            num_str = match.group(1)
+            # Validate it's a clean integer (no decimals, no commas)
+            if re.match(r"^-?\d+$", num_str):
+                try:
+                    # Make sure it's in valid range for the competition
+                    val = int(num_str)
+                    if 0 <= val <= 99999:
+                        return num_str
+                except ValueError:
+                    continue
+
+    # If no clean integer found, return empty string
+    return ""
 
 def score_candidate(candidate: SolutionCandidate, problem_text: str) -> float:
     """Score a candidate solution using deterministic checks"""
@@ -46,18 +54,41 @@ def score_candidate(candidate: SolutionCandidate, problem_text: str) -> float:
     arith_score = arith_sanity_check(candidate.raw_text)
     score += arith_score * 2.0  # Weight arithmetic consistency heavily
 
-    # Code execution verification
-    code_blocks = extract_code_blocks(candidate.raw_text)
-    if code_blocks:
-        code_score = 0.0
-        for code in code_blocks:
-            try:
-                result = safe_exec_python(code)
-                if "EXECUTION_ERROR" not in result:
-                    code_score += 1.0
-            except:
-                pass
-        score += (code_score / len(code_blocks)) * 1.5  # Bonus for working code
+    # Tool execution verification - exact integer matching, no substring nonsense
+    if hasattr(candidate, 'tool_results') and candidate.tool_results:
+        tool_bonus = 0.0
+
+        # Extract integers from final answer
+        import re
+        final_ints = set(int(x) for x in re.findall(r"-?\d+", candidate.final_answer or ""))
+
+        for tool_result in candidate.tool_results:
+            if tool_result and tool_result not in ["TIMEOUT", "COMPLEX_CODE"] and "EXECUTION_ERROR" not in tool_result:
+                # Extract integers from tool output
+                tool_ints = set(int(x) for x in re.findall(r"-?\d+", tool_result))
+
+                # Check for exact integer matches (not substrings)
+                if tool_ints and final_ints and (tool_ints & final_ints):
+                    tool_bonus += 1.0  # Tool result matches final answer integers
+                else:
+                    tool_bonus += 0.1  # Tool ran but no clear integer match
+
+                # Penalize timeouts (waste of budget)
+                if tool_result == "TIMEOUT":
+                    tool_bonus -= 0.5
+
+        # Execution quality bonus
+        if candidate.python_ok:
+            tool_bonus += 0.2  # Small bonus for overall success
+        else:
+            tool_bonus -= candidate.python_errors * 0.3  # Penalty for failures
+
+        # Reasonable tool usage (not spam)
+        num_tools = len(candidate.tool_results)
+        if num_tools >= 4:
+            tool_bonus -= (num_tools - 3) * 0.4  # Heavy penalty for tool spam
+
+        score += tool_bonus
 
     # Length bonus (reasonable solutions aren't too short/long)
     text_len = len(candidate.raw_text)
@@ -72,16 +103,10 @@ def score_candidate(candidate: SolutionCandidate, problem_text: str) -> float:
 
 def run_verifier(candidate: SolutionCandidate, problem_text: str) -> float:
     """Run LLM verifier on shortlisted candidates only"""
-    # For now, return score based on deterministic checks
-    # In production, this would call a separate verifier model
-    # But we implement the pipeline structure
-
-    verifier_score = score_candidate(candidate, problem_text)
-
-    # Additional verifier logic would go here
-    # Check for logical consistency, mathematical validity, etc.
-
-    return min(verifier_score, 5.0)  # Cap at reasonable max
+    # For now, return 0.0 - we don't have a real verifier model yet
+    # This avoids double-counting the same heuristics
+    # TODO: Implement actual judge model call here
+    return 0.0
 
 def select_best(candidates: List[SolutionCandidate], problem_text: str) -> SolutionCandidate:
     """

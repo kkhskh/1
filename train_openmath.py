@@ -20,6 +20,9 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import BitsAndBytesConfig
 import torch
 
+# Training constants
+MAX_LENGTH = 1024
+
 def create_sample_dataset():
     """Create a small sample dataset to demonstrate the training approach"""
     # Based on OpenMathReasoning structure from the paper
@@ -44,8 +47,8 @@ def create_sample_dataset():
     print("Using sample dataset (replace with actual OpenMathReasoning when available)")
     return Dataset.from_list(sample_problems)
 
-def load_math_dataset():
-    """Load the OpenMathReasoning dataset"""
+def load_train_dataset(max_cot=50_000, max_tir=25_000, seed=42):
+    """Load and oversample CoT/TIR datasets efficiently using interleave_datasets"""
     try:
         print("Loading OpenMathReasoning dataset...")
         # Add retry logic for HuggingFace API issues
@@ -53,7 +56,7 @@ def load_math_dataset():
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                dataset = load_dataset("nvidia/OpenMathReasoning")
+                ds = load_dataset("nvidia/OpenMathReasoning")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -62,30 +65,107 @@ def load_math_dataset():
                 else:
                     raise e
 
-        # Use the CoT (Chain-of-Thought) split which has solutions
-        cot_data = dataset['cot']
-        print(f"✅ Loaded CoT dataset: {len(cot_data)} samples")
+        # Use env vars for dataset size, treat 0 as "full dataset"
+        max_cot = int(os.getenv("MAX_COT", str(max_cot)))
+        max_tir = int(os.getenv("MAX_TIR", str(max_tir)))
 
-        # Filter for problems with extracted answers (higher quality)
-        filtered_data = cot_data.filter(lambda x: x['problem_type'] == 'has_answer_extracted')
-        print(f"✅ Filtered to {len(filtered_data)} problems with extracted answers")
+        def keep(x):
+            """Filter criteria for high-quality examples"""
+            sol = x["generated_solution"]
+            return (
+                x.get("problem_type") == "has_answer_extracted"
+                and 50 < len(sol) < 2000
+            )
 
-        return filtered_data
+        # Load and filter datasets (shuffle first, then select/filter for efficiency)
+        cot = ds["cot"].shuffle(seed=seed)
+        if max_cot > 0:
+            cot = cot.select(range(min(max_cot, len(cot))))
+        cot = cot.filter(keep)
+        print(f"✅ Filtered CoT: {len(cot)} samples")
+
+        tir = None
+        if "tir" in ds:
+            tir = ds["tir"].shuffle(seed=seed)
+            if max_tir > 0:
+                tir = tir.select(range(min(max_tir, len(tir))))
+            tir = tir.filter(keep)
+            print(f"✅ Filtered TIR: {len(tir)} samples")
+
+        # Oversample TIR using interleave_datasets (no RAM blowup)
+        if tir is not None and len(tir) > 0:
+            from datasets import interleave_datasets
+            combined_data = interleave_datasets(
+                [cot, tir],
+                probabilities=[0.4, 0.6],  # 60% TIR, 40% CoT for tool learning
+                seed=seed,
+                stopping_strategy="all_exhausted"
+            )
+            print(f"✅ Oversampled TIR: {len(cot)} CoT + {len(tir)} TIR → {len(combined_data)} total")
+            return combined_data
+
+        return cot
 
     except Exception as e:
-        print(f"❌ Could not load dataset after retries: {e}")
-        print("Using sample dataset instead...")
+        print(f"❌ Could not load dataset: {e}")
         return create_sample_dataset()
 
 def prepare_training_data(dataset):
-    """Prepare dataset for training"""
+    """Prepare dataset for training with standardized format"""
     def format_example(example):
-        """Format problem + solution as training text"""
+        """Format problem + solution with enforced RESULT convention"""
         problem = example['problem']
         solution = example['generated_solution']
 
-        # Format as instruction-response (following OpenMathReasoning style)
-        text = f"Problem: {problem}\n\n{solution}"
+        # Standardize python blocks to fenced format
+        import re
+        solution = re.sub(
+            r'python\s*\n(.*?)\nend',
+            r'```python\n\1\n```',
+            solution,
+            flags=re.DOTALL | re.IGNORECASE
+        )
+
+        # Enforce RESULT convention: if python block has print() but no RESULT, convert
+        def fix_python_block(match):
+            code = match.group(1)
+
+            # Strip import lines to align with inference sandbox
+            code = re.sub(r"(?m)^\s*(import|from)\s+.*$", "", code)
+
+            # If it has print(expr) anywhere but no RESULT, convert to RESULT = expr
+            if 'RESULT' not in code and 'print(' in code:
+                # Find the last print statement and convert it
+                lines = code.split('\n')
+                for i in range(len(lines) - 1, -1, -1):
+                    line = lines[i].strip()
+                    if line.startswith('print(') and line.endswith(')'):
+                        # Extract the expression from print(expr)
+                        expr = line[6:-1]  # Remove 'print(' and ')'
+                        # Replace this line with RESULT = expr
+                        lines[i] = f'RESULT = {expr}'
+                        break
+                code = '\n'.join(lines)
+            return f'```python\n{code}\n```'
+
+        solution = re.sub(r'```python\s*\n(.*?)\n```', fix_python_block, solution, flags=re.DOTALL)
+
+        # Strip existing FINAL lines and boxed answers to avoid duplicates
+        solution = re.sub(r'FINAL\s*[:=].*$', '', solution, flags=re.MULTILINE | re.IGNORECASE)
+        solution = re.sub(r'\\boxed\{[^}]*\}', '', solution)
+        solution = solution.strip()
+
+        # Add exactly one standardized final answer
+        expected_answer = str(example['expected_answer']).strip()
+
+        # Simulate chat format to align with inference
+        text = (
+            "SYSTEM: You are a competition mathematician. "
+            "If you use python code blocks, always set RESULT to the final value. "
+            "End your response with FINAL: <integer>.\n"
+            f"USER: {problem}\n"
+            f"ASSISTANT: {solution}\n\nFINAL: {expected_answer}"
+        )
 
         return {"text": text}
 
@@ -151,20 +231,19 @@ def setup_model_and_tokenizer():
 
     return model, tokenizer
 
-def tokenize_function(examples, tokenizer):
+def tokenize_function(examples):
     """Tokenize the text for instruction tuning"""
     return tokenizer(
         examples["text"],
         truncation=True,
-        padding="max_length",
-        max_length=1024,
-        return_tensors="pt"
+        max_length=MAX_LENGTH,
+        padding=False,          # dynamic padding via collator
     )
 
 def main():
     """Main training function"""
-    # Load data
-    dataset = load_math_dataset()
+    # Load data with efficient TIR oversampling
+    dataset = load_train_dataset()
 
     # Prepare training data
     train_data = prepare_training_data(dataset)
@@ -175,26 +254,29 @@ def main():
     # Tokenize dataset
     print("Tokenizing dataset...")
     tokenized_dataset = train_data.map(
-        lambda x: tokenize_function(x, tokenizer),
+        tokenize_function,
         batched=True,
         remove_columns=["text"]
     )
 
-    # Training arguments for LoRA fine-tuning with quantization
+    # Training arguments - optimized for Colab T4 (practical training times)
     training_args = TrainingArguments(
         output_dir="./models/openmath-finetuned",
-        per_device_train_batch_size=int(os.getenv('BATCH_SIZE', '1')),  # Keep small for quantized model
-        gradient_accumulation_steps=8,  # Increased for effective batch size
-        num_train_epochs=int(os.getenv('NUM_EPOCHS', '1')),
-        learning_rate=float(os.getenv('LEARNING_RATE', '1e-4')),  # Slightly lower for quantized
-        # fp16=False when using quantization (bnb handles it)
-        save_steps=50,  # Save more frequently
-        logging_steps=5,  # Log more frequently
-        save_total_limit=2,
-        eval_strategy="no",
+        per_device_train_batch_size=int(os.getenv("BATCH_SIZE", "1")),
+        gradient_accumulation_steps=8,
+        learning_rate=float(os.getenv("LEARNING_RATE", "1e-4")),
+        optim="paged_adamw_8bit",
         report_to="none",
-        warmup_steps=10,
-        optim="paged_adamw_8bit",  # Better optimizer for quantized models
+
+        # >>> CRITICAL FOR T4: STOP WASTING TIME <<<
+        max_steps=int(os.getenv("MAX_STEPS", "600")),     # 600 steps baseline
+        warmup_ratio=0.03,                                # better than warmup_steps guessing
+        lr_scheduler_type="cosine",
+
+        logging_steps=10,
+        save_steps=200,
+        save_total_limit=2,
+        evaluation_strategy="no",
     )
 
     # Data collator
@@ -211,6 +293,26 @@ def main():
         data_collator=data_collator,
     )
 
+    # >>> PROOF PRINTS: Verify what Cursor is actually doing <<<
+    print("max_steps =", training_args.max_steps)
+    print("warmup_ratio =", training_args.warmup_ratio)
+    print("train size =", len(tokenized_dataset))
+
+    # Show TIR proportion if possible - this proves tool learning is real
+    if hasattr(train_data, 'column_names') and "inference_mode" in train_data.column_names:
+        from collections import Counter
+        c = Counter(train_data.select(range(min(2000, len(train_data))))["inference_mode"])
+        print("sample inference_mode counts =", c)
+        if "tir" not in str(c).lower():
+            print("⚠️  WARNING: No TIR samples found - your 'tool learning' is fake!")
+        else:
+            print("✅ TIR samples detected - tool learning is real")
+
+    # Additional training configuration
+    print(f"Training configuration:")
+    print(f"  - lr_scheduler_type: {trainer.args.lr_scheduler_type}")
+    print(f"  - Effective batch size: {trainer.args.per_device_train_batch_size * trainer.args.gradient_accumulation_steps}")
+
     # Train
     print("Starting training...")
     trainer.train()
@@ -220,6 +322,7 @@ def main():
     tokenizer.save_pretrained("./models/openmath-finetuned")
 
     print("Training complete! Model saved to ./models/openmath-finetuned")
+
 
 if __name__ == "__main__":
     main()

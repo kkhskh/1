@@ -1,16 +1,39 @@
 # tools.py
 import re
-from dataclasses import dataclass
-from typing import Optional, List, Dict
-import pandas as pd
-import ast
-import operator
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Tuple
+
+# Safety patterns for tool execution
+_DANGEROUS = re.compile(r"(?i)\b(open|exec|eval|compile|__import__|subprocess|socket|requests|urllib)\b")
+_WHILE = re.compile(r"(?i)\bwhile\b")
+_FOR_STMT = re.compile(r"(?im)^\s*for\s+.+:\s*$")
+_IMPORT = re.compile(r"(?im)^\s*import\s+|^\s*from\s+\S+\s+import\s+")
+
+def is_safe_python(code: str) -> bool:
+    """Check if python code is safe to execute in sandbox"""
+    if len(code) > 800:
+        return False
+    if _DANGEROUS.search(code):
+        return False
+    # Block explicit imports (subprocess whitelist is second line of defense)
+    if _IMPORT.search(code):
+        return False
+    # Block while always
+    if _WHILE.search(code):
+        return False
+    # Block explicit for-loops, allow comprehensions
+    if _FOR_STMT.search(code):
+        return False
+    return True
 
 @dataclass
 class SolutionCandidate:
     raw_text: str           # full model output
     final_answer: Optional[str]  # parsed "FINAL: xxx"
     score: float = 0.0      # heuristic or judge score, filled later
+    tool_results: List[str] = field(default_factory=list)  # execution results from code blocks
+    python_ok: bool = False  # whether code execution succeeded
+    python_errors: int = 0   # count of execution failures
 
 FINAL_PATTERNS = [
     re.compile(r"(?:^|\n)\s*FINAL\s*[:=]\s*([^\n\r]+)", re.IGNORECASE),
@@ -19,66 +42,132 @@ FINAL_PATTERNS = [
 ]
 
 def extract_final_answer(text: str) -> Optional[str]:
-    """Extract final answer using multiple patterns, preferring the last plausible match"""
+    """Extract final answer using anchored patterns only - no fallback to tool outputs"""
     hits = []
     for pat in FINAL_PATTERNS:
         hits += [m.group(1).strip() for m in pat.finditer(text)]
 
     if hits:
-        # Clean up the answer and return the last one
+        # Clean up the answer and return the last anchored match
         final_answer = hits[-1].strip(" .;")
         return final_answer
-
-    # Fallback: last integer-ish token
-    import re as re_module
-    numbers = re_module.findall(r"[-+]?\d+", text)
-    if numbers:
-        return numbers[-1]
 
     return None
 
 def save_submission(rows: List[Dict], path: str):
+    import pandas as pd
     df = pd.DataFrame(rows)
     # Kaggle usually wants specific column order
     df = df[["problem_id", "answer"]]
     df.to_csv(path, index=False)
 
-def extract_code_blocks(text: str) -> List[str]:
-    """Extract python code blocks from text"""
-    code_pattern = re.compile(r'python\s*\n(.*?)\nend', re.DOTALL | re.IGNORECASE)
-    return [match.group(1).strip() for match in code_pattern.finditer(text)]
+def extract_python_blocks(text: str) -> List[str]:
+    """Extract python code blocks from text - supports both fenced and legacy formats"""
+    blocks = []
 
-def safe_exec_python(code: str) -> str:
-    """Safely execute python code with restricted environment"""
+    # Pattern 1: Fenced code blocks (```python ... ```)
+    fenced_pattern = re.compile(r'```python\s*\n(.*?)\n```', re.DOTALL | re.IGNORECASE)
+    blocks.extend([match.group(1).strip() for match in fenced_pattern.finditer(text)])
+
+    # Pattern 2: Legacy format (python\n...\nend)
+    legacy_pattern = re.compile(r'python\s*\n(.*?)\nend', re.DOTALL | re.IGNORECASE)
+    blocks.extend([match.group(1).strip() for match in legacy_pattern.finditer(text)])
+
+    return blocks
+
+def run_python_subprocess(code: str, timeout_s: float = 1.5) -> Tuple[str, bool]:
+    """
+    Execute python code in isolated subprocess with hard timeout.
+    No signal games - just subprocess.run with timeout.
+    """
+    import subprocess
+    import sys
+
+    harness = f"""
+import sys, json, math, resource
+from fractions import Fraction
+from decimal import Decimal
+
+# Resource limits for safety - simplified for now
+try:
+    # Try to set reasonable limits, but don't fail if not possible
+    resource.setrlimit(resource.RLIMIT_CPU, (2, resource.RLIM_INFINITY))  # 2s CPU limit
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))  # No file writes
+except:
+    pass  # Skip if limits can't be set
+
+# Import blocking - override __import__ safely
+import builtins
+
+ALLOWED_IMPORTS = {"math", "fractions", "decimal", "json"}
+_real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root not in ALLOWED_IMPORTS:
+        raise ImportError("Import blocked: " + name)
+    return _real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+
+# User code below.
+# Convention: ALWAYS set RESULT (not optional)
+RESULT = None
+
+{code}
+
+# Always check RESULT (mandatory convention)
+if RESULT is not None:
+    print(RESULT)
+# No noise output if RESULT not set
+"""
+
     try:
-        # Parse the code to check for dangerous operations
-        tree = ast.parse(code, mode='eval')
+        cp = subprocess.run(
+            [sys.executable, "-S"],  # -S = no site imports for isolation
+            input=harness,
+            text=True,
+            capture_output=True,
+            timeout=timeout_s,
+        )
+        if cp.returncode != 0:
+            error = cp.stderr.strip()[:500] or f"Exit code {cp.returncode}"
+            return f"EXECUTION_ERROR: {error}", False
 
-        # Safe builtins for math evaluation
-        safe_builtins = {
-            'abs': abs, 'round': round, 'min': min, 'max': max,
-            'sum': sum, 'len': len, 'range': range, 'int': int, 'float': float,
-            'str': str, 'bool': bool, 'list': list, 'dict': dict,
-            'set': set, 'tuple': tuple,
-            # Math operators
-            'pow': pow, '__builtins__': {},
-        }
 
-        # Add safe globals
-        safe_globals = {
-            '__builtins__': safe_builtins,
-            # Safe modules/functions
-            'math': __import__('math'),
-            'sympy': __import__('sympy'),
-        }
+        # Treat "no output" as failure - forces RESULT contract compliance
+        out_lines = [ln.strip() for ln in cp.stdout.splitlines() if ln.strip()]
+        if not out_lines:
+            return "NO_OUTPUT", False
+        last = out_lines[-1][:500]  # Use last line of output
+        return last, True
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", False
 
-        # Execute the code
-        result = eval(compile(tree, '<string>', 'eval'), safe_globals)
+def execute_python_blocks(text: str, timeout_s: float = 1.5) -> Tuple[List[str], bool, int]:
+    """Execute all python blocks in text and return results separately."""
+    blocks = extract_python_blocks(text)
+    if not blocks:
+        return [], False, 0  # No blocks = no tool execution attempted
 
-        return str(result)
+    results = []
+    errors = 0
+    all_ok = True
 
-    except Exception as e:
-        return f"EXECUTION_ERROR: {str(e)}"
+    for block in blocks:
+        # Safety check: block dangerous code before execution
+        if not is_safe_python(block):
+            results.append("COMPLEX_CODE_BLOCKED")
+            errors += 1
+            all_ok = False
+        else:
+            result, success = run_python_subprocess(block, timeout_s)
+            results.append(result)
+            if not success:
+                errors += 1
+                all_ok = False
+
+    return results, all_ok, errors
 
 def arith_sanity_check(text: str) -> float:
     """Check arithmetic consistency in text, return confidence score 0-1"""
